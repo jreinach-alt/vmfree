@@ -17,7 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vmfree.models import DiskDefinition, Firmware, NICDefinition, VMDefinition
+from vmfree.models import DiskDefinition, DiskType, Firmware, NICDefinition, VMDefinition
+from vmfree.parsers.vmdk import inspect_vmdk
 
 
 def parse_vmx_file(path: str | Path) -> VMDefinition:
@@ -117,6 +118,7 @@ def _extract_disks(entries: dict[str, str], vmx_dir: Path) -> list[DiskDefinitio
     """Extract all disk definitions from VMX entries.
 
     Scans for scsi*:*.fileName, ide*:*.fileName, and sata*:*.fileName keys.
+    Filters out CDROM/ISO devices — these are not convertible disks.
     Marks the first disk on the first controller as the boot disk.
     """
     disks: list[DiskDefinition] = []
@@ -128,11 +130,22 @@ def _extract_disks(entries: dict[str, str], vmx_dir: Path) -> list[DiskDefinitio
             for unit_id in range(16):
                 present_key = f"{controller}:{unit_id}.present"
                 filename_key = f"{controller}:{unit_id}.filename"
+                device_type_key = f"{controller}:{unit_id}.devicetype"
 
                 if entries.get(present_key, "").lower() != "true":
                     continue
                 filename = entries.get(filename_key, "")
                 if not filename:
+                    continue
+
+                # Skip CDROM/ISO devices — not convertible disks
+                device_type = entries.get(device_type_key, "").lower()
+                if "cdrom" in device_type or "atapi" in device_type:
+                    continue
+                if filename.lower().endswith(".iso"):
+                    continue
+                # "auto detect" is a CDROM with no media
+                if filename.lower() == "auto detect":
                     continue
 
                 disk_path = str(vmx_dir / filename)
@@ -142,11 +155,25 @@ def _extract_disks(entries: dict[str, str], vmx_dir: Path) -> list[DiskDefinitio
                     continue
                 seen.add(disk_key)
 
+                # Try to inspect the VMDK descriptor for size and type
+                size_bytes = 0
+                disk_type = DiskType.UNKNOWN
+                disk_file = vmx_dir / filename
+                if disk_file.exists() and disk_file.suffix.lower() == ".vmdk":
+                    try:
+                        vmdk_info = inspect_vmdk(disk_file)
+                        size_bytes = vmdk_info.virtual_size_bytes
+                        disk_type = vmdk_info.disk_type
+                    except (ValueError, OSError):
+                        pass
+
                 is_boot = len(disks) == 0
                 disks.append(DiskDefinition(
                     path=disk_path,
                     controller=controller,
                     unit=unit_id,
+                    size_bytes=size_bytes,
+                    disk_type=disk_type,
                     is_boot=is_boot,
                 ))
 

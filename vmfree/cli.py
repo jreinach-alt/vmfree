@@ -7,6 +7,7 @@ Connects the full 7-stage pipeline with Rich terminal UI.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -72,8 +73,8 @@ def main():
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--target", type=click.Choice(["kvm", "proxmox"]), required=True,
               help="Target hypervisor.")
-@click.option("--output", type=click.Path(), default=".",
-              help="Output directory for converted files.")
+@click.option("--output", type=click.Path(), default=None,
+              help="Output directory for converted files (default: same as source).")
 @click.option("--bridge", default=None, help="Network bridge (auto-detected if omitted).")
 @click.option("--storage", default="local-lvm", help="Proxmox storage target.")
 @click.option("--vmid", type=int, default=100, help="Proxmox VM ID.")
@@ -84,9 +85,11 @@ def main():
               help="Use IDE+e1000 for Windows (default for detected Windows guests).")
 @click.option("--preserve-mac", is_flag=True, help="Keep original MAC addresses.")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without doing it.")
+@click.option("--execute", is_flag=True,
+              help="Execute Proxmox qm commands directly instead of writing a script.")
 @click.option("-v", "--verbose", is_flag=True, help="Detailed output.")
 def migrate(source, target, output, bridge, storage, vmid, disk_format,
-            no_fixup, windows_safe, preserve_mac, dry_run, verbose):
+            no_fixup, windows_safe, preserve_mac, dry_run, execute, verbose):
     """Migrate a VMware VM to KVM/Proxmox."""
     _run_migration(
         source=source,
@@ -99,6 +102,7 @@ def migrate(source, target, output, bridge, storage, vmid, disk_format,
         windows_safe=windows_safe,
         preserve_mac=preserve_mac,
         dry_run=dry_run,
+        execute=execute,
         verbose=verbose,
     )
 
@@ -346,7 +350,7 @@ def _run_migration(
     *,
     source: str,
     target: str,
-    output_dir: str,
+    output_dir: str | None,
     bridge: str | None,
     storage: str,
     vmid: int,
@@ -354,6 +358,7 @@ def _run_migration(
     windows_safe: bool,
     preserve_mac: bool,
     dry_run: bool,
+    execute: bool = False,
     verbose: bool,
     run_command: object = None,
 ) -> bool:
@@ -361,6 +366,10 @@ def _run_migration(
 
     Returns True on success, False on failure.
     """
+    # Default output to the source file's directory
+    if output_dir is None:
+        output_dir = str(Path(source).parent)
+
     console.print(f"\n  [bold]VMFree v{__version__}[/bold] — VMware to KVM Migration Tool\n")
 
     # -- Stage 1: Parse input --
@@ -455,6 +464,10 @@ def _run_migration(
         script_path.write_text("#!/bin/bash\nset -e\n\n" + "\n\n".join(cmds) + "\n")
         console.print(f"  [green]ok[/green] Proxmox commands written to {script_path}")
 
+        if execute:
+            console.print("\n  [bold]Executing Proxmox commands...[/bold]")
+            _execute_proxmox_commands(cmds, run_command=run_command)
+
     # -- Summary --
     _show_summary(vm, hw, target, bridge, converted_paths, vmid, preserve_mac)
     return True
@@ -548,6 +561,38 @@ def _show_dry_run(vm, hw, target, disk_format, bridge, storage, vmid,
         ))
 
     return True
+
+
+def _execute_proxmox_commands(
+    cmds: list[str],
+    *,
+    run_command: object = None,
+) -> None:
+    """Execute Proxmox qm commands sequentially.
+
+    Each multi-line command (joined with backslash-newline) is flattened
+    into a single line before execution.
+
+    Args:
+        cmds: List of qm command strings from the generator.
+        run_command: Injectable callable for testing (default: subprocess.run).
+    """
+    if run_command is None:
+        def run_command(cmd, **kwargs):
+            return subprocess.run(cmd, **kwargs)
+
+    for cmd in cmds:
+        # Flatten multi-line commands (backslash continuations)
+        flat_cmd = cmd.replace(" \\\n  ", " ")
+        console.print(f"  [dim]$[/dim] {flat_cmd}")
+        result = run_command(flat_cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            console.print(f"  [red]Error (exit {result.returncode}):[/red] {stderr}")
+            sys.exit(1)
+        if result.stdout.strip():
+            console.print(f"  {result.stdout.strip()}")
+        console.print("  [green]ok[/green]")
 
 
 def _show_summary(vm, hw, target, bridge, converted_paths, vmid, preserve_mac):
