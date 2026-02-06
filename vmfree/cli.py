@@ -19,11 +19,42 @@ from vmfree import __version__
 from vmfree.converter.disk import convert_disk
 from vmfree.generators.libvirt import generate_libvirt_xml
 from vmfree.generators.proxmox import generate_proxmox_commands
-from vmfree.mapper.hardware import map_hardware
+from vmfree.mapper.hardware import (
+    map_controller,
+    map_display,
+    map_firmware,
+    map_hardware,
+    map_nic,
+)
+from vmfree.models import VMDefinition
 from vmfree.network.detect import detect_bridge
+from vmfree.parsers.ovf import parse_ovf_or_ova
 from vmfree.parsers.vmx import parse_vmx_file
 
 console = Console()
+
+
+def _parse_source(source: str) -> VMDefinition:
+    """Parse a VMware source file (VMX, OVF, or OVA) into a VMDefinition.
+
+    Dispatches to the correct parser based on file extension.
+
+    Raises:
+        click.ClickException: If the file type is unsupported or parsing fails.
+    """
+    source_path = Path(source)
+    suffix = source_path.suffix.lower()
+
+    try:
+        if suffix == ".vmx":
+            return parse_vmx_file(source_path)
+        if suffix in (".ovf", ".ova"):
+            return parse_ovf_or_ova(source_path)
+        raise click.ClickException(
+            f"Unsupported file type: {suffix}. Use .vmx, .ovf, or .ova"
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise click.ClickException(str(e)) from e
 
 
 @click.group()
@@ -75,7 +106,108 @@ def migrate(source, target, output, bridge, storage, vmid, disk_format,
 @click.argument("source", type=click.Path(exists=True))
 def inspect(source):
     """Analyze a VMware VM without migrating."""
-    click.echo(f"Inspect for {source} is not yet implemented.")
+    _run_inspect(source)
+
+
+def _run_inspect(source: str) -> VMDefinition:
+    """Parse and display VM analysis. Returns VMDefinition for testing."""
+    vm = _parse_source(source)
+
+    console.print(f"\n  [bold]VMFree v{__version__}[/bold] — VM Inspector\n")
+
+    # -- General info --
+    info_table = Table(show_header=False, box=None, padding=(0, 1))
+    info_table.add_column(style="dim", min_width=16)
+    info_table.add_column()
+
+    info_table.add_row("Name:", vm.name)
+    info_table.add_row("Guest OS:", vm.guest_os or "(not set)")
+    info_table.add_row("vCPUs:", str(vm.vcpus))
+    info_table.add_row("Memory:", f"{vm.memory_mb} MB")
+    info_table.add_row("Firmware:", vm.firmware.value.upper())
+    hw_ver = str(vm.hardware_version) if vm.hardware_version else "unknown"
+    info_table.add_row("HW Version:", hw_ver)
+    info_table.add_row("Source:", str(vm.source_file))
+
+    if vm.is_windows:
+        info_table.add_row("Windows:", "Yes (safe mode recommended)")
+
+    console.print(Panel(info_table, title="VM Information", border_style="cyan"))
+
+    # -- Disks --
+    if vm.disks:
+        disk_table = Table(show_header=True, box=None, padding=(0, 1))
+        disk_table.add_column("#", style="dim")
+        disk_table.add_column("Path")
+        disk_table.add_column("Controller")
+        disk_table.add_column("Size")
+        disk_table.add_column("Boot")
+
+        for i, disk in enumerate(vm.disks):
+            size_str = _format_size(disk.size_bytes) if disk.size_bytes else "unknown"
+            boot_str = "yes" if disk.is_boot else ""
+            disk_table.add_row(
+                str(i), Path(disk.path).name, f"{disk.controller}:{disk.unit}",
+                size_str, boot_str,
+            )
+
+        console.print(Panel(disk_table, title="Disks", border_style="cyan"))
+
+    # -- NICs --
+    if vm.nics:
+        nic_table = Table(show_header=True, box=None, padding=(0, 1))
+        nic_table.add_column("#", style="dim")
+        nic_table.add_column("Type")
+        nic_table.add_column("MAC")
+        nic_table.add_column("Connection")
+        nic_table.add_column("Network")
+
+        for i, nic in enumerate(vm.nics):
+            nic_table.add_row(
+                str(i), nic.virtual_dev, nic.mac_address or "(auto)",
+                nic.connection_type, nic.network_name,
+            )
+
+        console.print(Panel(nic_table, title="Network Interfaces", border_style="cyan"))
+
+    # -- Hardware mapping preview --
+    hw_table = Table(show_header=True, box=None, padding=(0, 1))
+    hw_table.add_column("VMware", style="dim")
+    hw_table.add_column("KVM")
+
+    if vm.scsi_controller:
+        hw_table.add_row(
+            f"Controller: {vm.scsi_controller}",
+            map_controller(vm.scsi_controller),
+        )
+
+    for nic in vm.nics:
+        hw_table.add_row(
+            f"NIC: {nic.virtual_dev}",
+            map_nic(nic.virtual_dev),
+        )
+
+    hw_table.add_row(f"Display: {vm.display}", map_display(vm.display))
+
+    fw_path = map_firmware(vm.firmware.value)
+    fw_label = f"OVMF ({fw_path})" if fw_path else "SeaBIOS"
+    hw_table.add_row(f"Firmware: {vm.firmware.value}", fw_label)
+
+    console.print(Panel(hw_table, title="Hardware Mapping Preview", border_style="cyan"))
+    console.print()
+
+    return vm
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format byte size as human-readable string."""
+    if size_bytes >= 1024 ** 3:
+        return f"{size_bytes / (1024 ** 3):.1f} GB"
+    if size_bytes >= 1024 ** 2:
+        return f"{size_bytes / (1024 ** 2):.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
 
 
 @main.command()
@@ -121,11 +253,10 @@ def _run_migration(
     console.print(f"\n  [bold]VMFree v{__version__}[/bold] — VMware to KVM Migration Tool\n")
 
     # -- Stage 1: Parse input --
-    source_path = Path(source)
     try:
-        vm = parse_vmx_file(source_path)
-    except (FileNotFoundError, ValueError) as e:
-        console.print(f"  [red]Error:[/red] {e}")
+        vm = _parse_source(source)
+    except click.ClickException as e:
+        console.print(f"  [red]Error:[/red] {e.message}")
         sys.exit(1)
 
     # Auto-detect Windows → enable safe mode
