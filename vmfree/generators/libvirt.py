@@ -151,14 +151,28 @@ def _build_nics(
         ET.SubElement(iface, "model", type=hw.nic)
 
         if preserve_mac and nic.mac_address:
-            ET.SubElement(iface, "mac", address=nic.mac_address)
+            # Normalize MAC to colon-separated format (libvirt requires it).
+            # OVF v2 uses dash-separated IEEE notation: 00-16-8B-DB-00-5E
+            mac = nic.mac_address.replace("-", ":")
+            ET.SubElement(iface, "mac", address=mac)
+
+
+# Map hardware display names to libvirt video model types.
+# Libvirt uses "virtio" (not "virtio-vga" or "virtiovga") for virtio GPU.
+_LIBVIRT_VIDEO_MODEL: dict[str, str] = {
+    "virtio-vga": "virtio",
+    "qxl": "qxl",
+    "vga": "vga",
+    "cirrus": "cirrus",
+}
 
 
 def _build_graphics(devices: ET.Element, hw: MappedHardware) -> None:
     """Build VNC graphics and video display elements."""
     ET.SubElement(devices, "graphics", type="vnc", port="-1", listen="0.0.0.0")
     video = ET.SubElement(devices, "video")
-    ET.SubElement(video, "model", type=hw.display.replace("-", ""))
+    model_type = _LIBVIRT_VIDEO_MODEL.get(hw.display, "virtio")
+    ET.SubElement(video, "model", type=model_type)
 
 
 def _build_guest_agent(devices: ET.Element) -> None:

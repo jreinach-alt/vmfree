@@ -156,7 +156,8 @@ def _build_nic_string(
     parts = [f"{nic_model},bridge={bridge}"]
 
     if preserve_mac and vm.nics and vm.nics[0].mac_address:
-        parts.append(f"macaddr={vm.nics[0].mac_address}")
+        mac = vm.nics[0].mac_address.replace("-", ":")
+        parts.append(f"macaddr={mac}")
 
     return ",".join(parts)
 

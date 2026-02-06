@@ -11,6 +11,7 @@ Sources:
   - Canonical: https://github.com/canonical/cloud-init
 """
 
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -300,5 +301,5 @@ class TestTruncatedFile:
     """vmware-archive-centos.ovf is truncated XML from the source repo."""
 
     def test_raises_parse_error(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ET.ParseError):
             parse_ovf_file(FIXTURES / "vmware-archive-centos.ovf")
