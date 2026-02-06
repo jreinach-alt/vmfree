@@ -17,6 +17,7 @@ from rich.table import Table
 
 from vmfree import __version__
 from vmfree.converter.disk import convert_disk
+from vmfree.converter.validate import check_free_space, check_qemu_img_installed
 from vmfree.generators.libvirt import generate_libvirt_xml
 from vmfree.generators.proxmox import generate_proxmox_commands
 from vmfree.mapper.hardware import (
@@ -222,9 +223,119 @@ def convert(source, disk_format, output):
 
 @main.command()
 @click.argument("source", type=click.Path(exists=True))
-def validate(source):
+@click.option("--target", type=click.Choice(["kvm", "proxmox"]), default="kvm",
+              help="Target hypervisor for validation context.")
+@click.option("--output", type=click.Path(), default=".",
+              help="Output directory for space check.")
+def validate(source, target, output):
     """Run pre-flight checks on a VMware VM."""
-    click.echo(f"Validate for {source} is not yet implemented.")
+    _run_validate(source=source, target=target, output_dir=output)
+
+
+def _run_validate(
+    *,
+    source: str,
+    target: str = "kvm",
+    output_dir: str = ".",
+) -> list[tuple[bool, str]]:
+    """Run pre-flight checks and display results.
+
+    Returns list of (ok, message) tuples for testing.
+    """
+    console.print(f"\n  [bold]VMFree v{__version__}[/bold] — Pre-flight Validation\n")
+
+    results: list[tuple[bool, str]] = []
+
+    # Check 1: Parse source file
+    try:
+        vm = _parse_source(source)
+        results.append((True, f"Source parsed: {vm.name}"))
+    except click.ClickException as e:
+        results.append((False, f"Source parse failed: {e.message}"))
+        _display_validation_results(results)
+        return results
+
+    # Check 2: Guest OS identification
+    if vm.guest_os:
+        results.append((True, f"Guest OS: {vm.guest_os}"))
+    else:
+        results.append((False, "Guest OS not identified"))
+
+    # Check 3: Windows detection warning
+    if vm.is_windows:
+        results.append((
+            True,
+            "Windows detected: safe mode (IDE+e1000) will be used",
+        ))
+
+    # Check 4: Firmware
+    fw_label = "EFI (OVMF required)" if vm.is_efi else "BIOS (SeaBIOS)"
+    results.append((True, f"Firmware: {fw_label}"))
+
+    # Check 5: OVMF firmware file exists (EFI only)
+    if vm.is_efi:
+        ovmf_path = Path(map_firmware("efi") or "")
+        if ovmf_path.exists():
+            results.append((True, f"OVMF found: {ovmf_path}"))
+        else:
+            results.append((
+                False,
+                f"OVMF not found: {ovmf_path} "
+                "(install ovmf package)",
+            ))
+
+    # Check 6: Disk files exist
+    for disk in vm.disks:
+        disk_path = Path(disk.path)
+        if disk_path.exists():
+            results.append((True, f"Disk found: {disk_path.name}"))
+        else:
+            results.append((False, f"Disk missing: {disk_path.name}"))
+
+    # Check 7: qemu-img available
+    qemu_check = check_qemu_img_installed()
+    results.append((qemu_check.ok, qemu_check.message))
+
+    # Check 8: Output directory
+    outdir = Path(output_dir)
+    if outdir.exists():
+        results.append((True, f"Output directory: {outdir}"))
+    else:
+        results.append((False, f"Output directory missing: {outdir}"))
+
+    # Check 9: Free space on output
+    if outdir.exists():
+        total_disk_bytes = sum(d.size_bytes for d in vm.disks)
+        if total_disk_bytes > 0:
+            space_check = check_free_space(outdir, total_disk_bytes)
+            results.append((space_check.ok, space_check.message))
+
+    # Check 10: Network bridge detection
+    bridge = detect_bridge(target=target)
+    results.append((True, f"Network bridge: {bridge}"))
+
+    _display_validation_results(results)
+    return results
+
+
+def _display_validation_results(results: list[tuple[bool, str]]) -> None:
+    """Display validation results in a Rich panel."""
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column(style="bold", min_width=4)
+    table.add_column()
+
+    all_ok = True
+    for ok, msg in results:
+        if ok:
+            table.add_row("[green]PASS[/green]", msg)
+        else:
+            table.add_row("[red]FAIL[/red]", msg)
+            all_ok = False
+
+    border = "green" if all_ok else "red"
+    title = "Validation Passed" if all_ok else "Validation Failed"
+    console.print(Panel(table, title=title, border_style=border))
+    console.print()
 
 
 # ---------------------------------------------------------------------------
