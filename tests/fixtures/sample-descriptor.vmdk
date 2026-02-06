@@ -1,0 +1,18 @@
+# Disk DescriptorFile
+version=1
+CID=fffffffe
+parentCID=ffffffff
+createType="monolithicSparse"
+
+# Extent description
+RW 134217728 SPARSE "sample-descriptor.vmdk"
+
+# The Disk Data Base
+#DDB
+
+ddb.virtualHWVersion = "21"
+ddb.geometry.cylinders = "8354"
+ddb.geometry.heads = "255"
+ddb.geometry.sectors = "63"
+ddb.adapterType = "lsilogic"
+ddb.toolsVersion = "12352"
