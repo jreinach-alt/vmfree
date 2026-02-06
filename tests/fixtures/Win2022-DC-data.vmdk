@@ -1,0 +1,8 @@
+# Disk DescriptorFile
+version=1
+CID=55667788
+parentCID=ffffffff
+createType="monolithicSparse"
+RW 67108864 SPARSE "Win2022-DC-data.vmdk"
+ddb.virtualHWVersion = "19"
+ddb.adapterType = "lsilogic"
