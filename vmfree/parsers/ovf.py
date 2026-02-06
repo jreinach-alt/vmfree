@@ -25,10 +25,14 @@ from pathlib import Path
 from vmfree.models import DiskDefinition, DiskType, Firmware, NICDefinition, VMDefinition
 
 # OVF XML namespaces
-NS_OVF = "http://schemas.dmtf.org/ovf/envelope/1"
+NS_OVF_V1 = "http://schemas.dmtf.org/ovf/envelope/1"
+NS_OVF_V2 = "http://schemas.dmtf.org/ovf/envelope/2"
 NS_RASD = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
 NS_VSSD = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData"
 NS_VMW = "http://www.vmware.com/schema/ovf"
+
+# Legacy alias for backwards compatibility
+NS_OVF = NS_OVF_V1
 
 # OVF ResourceType constants (CIM standard)
 RESOURCE_CPU = "3"
@@ -105,6 +109,47 @@ def parse_ovf_or_ova(path: str | Path) -> VMDefinition:
 # Internal parsing
 # ---------------------------------------------------------------------------
 
+def _detect_ovf_namespace(root: ET.Element) -> str:
+    """Detect the OVF namespace from the root element tag.
+
+    Supports both OVF v1 (envelope/1) and OVF v2 (envelope/2).
+    Falls back to v1 if the namespace can't be determined.
+    """
+    tag = root.tag
+    if "}" in tag:
+        ns = tag.split("}")[0].lstrip("{")
+        if ns in (NS_OVF_V1, NS_OVF_V2):
+            return ns
+    return NS_OVF_V1
+
+
+def _find_virtual_system(root: ET.Element, ns: str) -> ET.Element | None:
+    """Find the first VirtualSystem element, including inside VirtualSystemCollection.
+
+    vCloud vApp exports and multi-VM OVFs wrap VirtualSystem elements
+    inside a VirtualSystemCollection container. This function checks
+    both direct children and one level of nesting.
+    """
+    # Try direct child first (standard single-VM OVF)
+    vs = root.find(f"{{{ns}}}VirtualSystem")
+    if vs is not None:
+        return vs
+
+    # Try inside VirtualSystemCollection (vCloud vApps, multi-VM)
+    vsc = root.find(f"{{{ns}}}VirtualSystemCollection")
+    if vsc is not None:
+        vs = vsc.find(f"{{{ns}}}VirtualSystem")
+        if vs is not None:
+            return vs
+
+    # Fallback: recursive search by local tag name (handles unknown namespaces)
+    for elem in root.iter():
+        if _local_tag(elem.tag) == "VirtualSystem":
+            return elem
+
+    return None
+
+
 def _parse_ovf_root(root: ET.Element, source_path: Path) -> VMDefinition:
     """Parse an OVF root element into a VMDefinition."""
     # Validate this is an OVF envelope
@@ -113,41 +158,67 @@ def _parse_ovf_root(root: ET.Element, source_path: Path) -> VMDefinition:
     if local_tag != "Envelope":
         raise ValueError(f"Not an OVF file: root element is {tag}")
 
-    # Extract file references (DiskSection, References)
-    file_refs = _extract_file_references(root)
-    disk_refs = _extract_disk_references(root)
+    # Detect namespace version (v1 or v2)
+    ns = _detect_ovf_namespace(root)
 
-    # Find the VirtualSystem element
-    vs = root.find(f"{{{NS_OVF}}}VirtualSystem")
+    # Extract file references (DiskSection, References)
+    file_refs = _extract_file_references(root, ns)
+    disk_refs = _extract_disk_references(root, ns)
+
+    # Find the VirtualSystem element (handles VirtualSystemCollection nesting)
+    vs = _find_virtual_system(root, ns)
     if vs is None:
         raise ValueError("OVF missing VirtualSystem element")
 
     # VM name
-    name = vs.get(f"{{{NS_OVF}}}id", "")
-    name_elem = vs.find(f"{{{NS_OVF}}}Name")
-    if name_elem is not None and name_elem.text:
+    name = vs.get(f"{{{ns}}}id", "")
+    name_elem = vs.find(f"{{{ns}}}Name")
+    if name_elem is None:
+        # Fallback: search by local tag name
+        for child in vs:
+            if _local_tag(child.tag) == "Name" and child.text:
+                name = child.text
+                break
+    elif name_elem.text:
         name = name_elem.text
 
     # Operating system
-    os_section = vs.find(f"{{{NS_OVF}}}OperatingSystemSection")
+    os_section = vs.find(f"{{{ns}}}OperatingSystemSection")
+    if os_section is None:
+        # Fallback: search by local tag
+        for child in vs:
+            if _local_tag(child.tag) == "OperatingSystemSection":
+                os_section = child
+                break
     guest_os = ""
     if os_section is not None:
         vmw_os = os_section.get(f"{{{NS_VMW}}}osType", "")
         if vmw_os:
             guest_os = vmw_os
-        elif os_section.get(f"{{{NS_OVF}}}id"):
-            guest_os = os_section.get(f"{{{NS_OVF}}}id", "")
-        desc = os_section.find(f"{{{NS_OVF}}}Description")
+        elif os_section.get(f"{{{ns}}}id"):
+            guest_os = os_section.get(f"{{{ns}}}id", "")
+        desc = os_section.find(f"{{{ns}}}Description")
+        if desc is None:
+            for child in os_section:
+                if _local_tag(child.tag) == "Description" and child.text:
+                    desc = child
+                    break
         if desc is not None and desc.text and not guest_os:
             guest_os = desc.text
 
     # Virtual hardware section
-    vhs = vs.find(f"{{{NS_OVF}}}VirtualHardwareSection")
+    vhs = vs.find(f"{{{ns}}}VirtualHardwareSection")
+    if vhs is None:
+        # Fallback: search by local tag
+        for child in vs:
+            if _local_tag(child.tag) == "VirtualHardwareSection":
+                vhs = child
+                break
     if vhs is None:
         raise ValueError("OVF missing VirtualHardwareSection")
 
     # System info (hardware version, firmware)
-    hw_version, firmware = _extract_system_info(vhs)
+    hw_version, firmware = _extract_system_info(vhs, ns)
 
     # Parse resource items
     vcpus = 1
@@ -159,6 +230,15 @@ def _parse_ovf_root(root: ET.Element, source_path: Path) -> VMDefinition:
 
     for item in vhs:
         tag_local = _local_tag(item.tag)
+
+        # OVF v2 uses EthernetPortItem for NICs
+        if tag_local == "EthernetPortItem":
+            nic = _parse_nic_item(item)
+            nics.append(nic)
+            continue
+
+        # OVF v2 uses StorageItem for disks — skip for now
+        # (these use ResourceType 31 with inline capacity, not disk references)
         if tag_local != "Item":
             continue
 
@@ -175,11 +255,7 @@ def _parse_ovf_root(root: ET.Element, source_path: Path) -> VMDefinition:
             qty = _get_rasd(item, "VirtualQuantity")
             units = _get_rasd(item, "AllocationUnits") or ""
             if qty:
-                mem_val = int(qty)
-                if "giga" in units.lower() or "gb" in units.lower():
-                    memory_mb = mem_val * 1024
-                else:
-                    memory_mb = mem_val
+                memory_mb = _parse_memory(int(qty), units)
 
         elif resource_type == RESOURCE_SCSI_CONTROLLER:
             instance_id = _get_rasd(item, "InstanceID")
@@ -220,31 +296,49 @@ def _parse_ovf_root(root: ET.Element, source_path: Path) -> VMDefinition:
     )
 
 
-def _extract_file_references(root: ET.Element) -> dict[str, str]:
+def _extract_file_references(root: ET.Element, ns: str = NS_OVF_V1) -> dict[str, str]:
     """Extract References/File elements: {id: href}."""
     refs: dict[str, str] = {}
-    references = root.find(f"{{{NS_OVF}}}References")
+    references = root.find(f"{{{ns}}}References")
+    if references is None:
+        # Fallback: search by local tag
+        for child in root:
+            if _local_tag(child.tag) == "References":
+                references = child
+                break
     if references is None:
         return refs
-    for file_elem in references.findall(f"{{{NS_OVF}}}File"):
-        file_id = file_elem.get(f"{{{NS_OVF}}}id", "")
-        href = file_elem.get(f"{{{NS_OVF}}}href", "")
+    for file_elem in references:
+        if _local_tag(file_elem.tag) != "File":
+            continue
+        file_id = file_elem.get(f"{{{ns}}}id", "")
+        href = file_elem.get(f"{{{ns}}}href", "")
         if file_id and href:
             refs[file_id] = href
     return refs
 
 
-def _extract_disk_references(root: ET.Element) -> dict[str, tuple[str, int]]:
+def _extract_disk_references(
+    root: ET.Element, ns: str = NS_OVF_V1,
+) -> dict[str, tuple[str, int]]:
     """Extract DiskSection/Disk elements: {diskId: (fileRef, capacity_bytes)}."""
     disks: dict[str, tuple[str, int]] = {}
-    disk_section = root.find(f"{{{NS_OVF}}}DiskSection")
+    disk_section = root.find(f"{{{ns}}}DiskSection")
+    if disk_section is None:
+        # Fallback: search by local tag
+        for child in root:
+            if _local_tag(child.tag) == "DiskSection":
+                disk_section = child
+                break
     if disk_section is None:
         return disks
-    for disk_elem in disk_section.findall(f"{{{NS_OVF}}}Disk"):
-        disk_id = disk_elem.get(f"{{{NS_OVF}}}diskId", "")
-        file_ref = disk_elem.get(f"{{{NS_OVF}}}fileRef", "")
-        capacity = disk_elem.get(f"{{{NS_OVF}}}capacity", "0")
-        cap_units = disk_elem.get(f"{{{NS_OVF}}}capacityAllocationUnits", "byte")
+    for disk_elem in disk_section:
+        if _local_tag(disk_elem.tag) != "Disk":
+            continue
+        disk_id = disk_elem.get(f"{{{ns}}}diskId", "")
+        file_ref = disk_elem.get(f"{{{ns}}}fileRef", "")
+        capacity = disk_elem.get(f"{{{ns}}}capacity", "0")
+        cap_units = disk_elem.get(f"{{{ns}}}capacityAllocationUnits", "byte")
 
         cap_bytes = _parse_capacity(capacity, cap_units)
 
@@ -271,12 +365,39 @@ def _parse_capacity(capacity: str, units: str) -> int:
     return cap_val
 
 
-def _extract_system_info(vhs: ET.Element) -> tuple[int, Firmware]:
+def _parse_memory(value: int, units: str) -> int:
+    """Convert a memory value + units string to megabytes.
+
+    Handles OVF allocation units like:
+      - "byte * 2^20" (OVF v1 with spaces)
+      - "byte*2^30" (OVF v2 without spaces)
+      - "MegaBytes", "GigaBytes", "GB", "MB"
+    """
+    u = units.lower().replace(" ", "")
+    if "2^30" in u or "giga" in u or "gb" in u:
+        return value * 1024
+    if "2^20" in u or "mega" in u or "mb" in u:
+        return value
+    if "2^10" in u or "kilo" in u or "kb" in u:
+        return max(1, value // 1024)
+    # Default: assume megabytes (most common in OVF)
+    return value
+
+
+def _extract_system_info(
+    vhs: ET.Element, ns: str = NS_OVF_V1,
+) -> tuple[int, Firmware]:
     """Extract hardware version and firmware from VirtualHardwareSection."""
     hw_version = 0
     firmware = Firmware.BIOS
 
-    system = vhs.find(f"{{{NS_OVF}}}System")
+    system = vhs.find(f"{{{ns}}}System")
+    if system is None:
+        # Fallback: search by local tag
+        for child in vhs:
+            if _local_tag(child.tag) == "System":
+                system = child
+                break
     if system is None:
         return hw_version, firmware
 
