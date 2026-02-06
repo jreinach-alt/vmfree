@@ -49,6 +49,8 @@ def convert_disk(
     output_dir: str | Path,
     *,
     disk_format: str = "qcow2",
+    compress: bool = False,
+    preallocation: str | None = None,
     progress_callback: ProgressCallback | None = None,
     run_command: object = None,
 ) -> ConversionResult:
@@ -58,6 +60,8 @@ def convert_disk(
         source_path: Path to the VMDK descriptor file (NOT the -flat.vmdk).
         output_dir: Directory to write the converted disk into.
         disk_format: Target format — "qcow2" or "raw".
+        compress: Enable qcow2 compression (-c). Only applies to qcow2 format.
+        preallocation: Preallocation mode ("off", "metadata", "full", or None).
         progress_callback: Optional callback for progress updates.
             Called with (percent, bytes_written).
         run_command: Optional callable to execute subprocess commands.
@@ -91,9 +95,19 @@ def convert_disk(
         "-p",               # Progress reporting
         "-f", "vmdk",       # Source format
         "-O", disk_format,  # Target format
-        str(source),
-        str(output_path),
     ]
+
+    # qcow2-specific options
+    if disk_format == "qcow2" and compress:
+        cmd.append("-c")
+
+    output_options: list[str] = []
+    if preallocation:
+        output_options.append(f"preallocation={preallocation}")
+    if output_options:
+        cmd.extend(["-o", ",".join(output_options)])
+
+    cmd.extend([str(source), str(output_path)])
 
     try:
         result = runner(

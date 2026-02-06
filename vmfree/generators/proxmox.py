@@ -34,6 +34,7 @@ def generate_proxmox_commands(
     storage: str = "local-lvm",
     bridge: str = "vmbr0",
     preserve_mac: bool = True,
+    snapshot_name: str | None = None,
 ) -> list[str]:
     """Generate a sequence of Proxmox qm commands for VM creation.
 
@@ -46,6 +47,7 @@ def generate_proxmox_commands(
         storage: Proxmox storage target (e.g. "local-lvm", "local-zfs").
         bridge: Network bridge (default: vmbr0).
         preserve_mac: Whether to preserve original MAC addresses.
+        snapshot_name: If set, create a snapshot with this name after import.
 
     Returns:
         Ordered list of qm command strings ready for execution.
@@ -68,6 +70,13 @@ def generate_proxmox_commands(
     # 4. EFI disk for UEFI guests
     if hw.firmware_path:
         commands.append(_build_efidisk_command(vmid, storage))
+
+    # 5. Snapshot after import (safety net before first boot)
+    if snapshot_name:
+        commands.append(
+            f"qm snapshot {vmid} {snapshot_name}"
+            f" --description 'VMFree pre-boot snapshot'"
+        )
 
     return commands
 

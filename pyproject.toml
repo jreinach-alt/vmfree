@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vmfree"
-version = "0.1.1"
+version = "0.2.0"
 description = "One-command migration from VMware to KVM/Proxmox. No PhD required."
 readme = "README.md"
 license = {text = "MIT"}
