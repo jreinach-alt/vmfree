@@ -1,0 +1,20 @@
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "14"
+displayName = "CentOS-7"
+guestOS = "centos-64"
+memsize = "2048"
+numvcpus = "1"
+
+scsi0.virtualDev = "lsilogic"
+scsi0.present = "TRUE"
+scsi0:0.fileName = "CentOS-7.vmdk"
+scsi0:0.present = "TRUE"
+
+ethernet0.virtualDev = "e1000e"
+ethernet0.present = "TRUE"
+ethernet0.connectionType = "nat"
+ethernet0.addressType = "generated"
+ethernet0.generatedAddress = "00:0c:29:aa:bb:cc"
+
+svga.present = "TRUE"

@@ -1,0 +1,21 @@
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "21"
+displayName = "Ubuntu-Server-22"
+guestOS = "ubuntu-64"
+memsize = "4096"
+numvcpus = "4"
+firmware = "efi"
+
+scsi0.virtualDev = "pvscsi"
+scsi0.present = "TRUE"
+scsi0:0.fileName = "Ubuntu-Server-22.vmdk"
+scsi0:0.present = "TRUE"
+
+ethernet0.virtualDev = "vmxnet3"
+ethernet0.present = "TRUE"
+ethernet0.connectionType = "bridged"
+ethernet0.addressType = "generated"
+ethernet0.generatedAddress = "00:0c:29:7d:2d:68"
+
+svga.present = "TRUE"
