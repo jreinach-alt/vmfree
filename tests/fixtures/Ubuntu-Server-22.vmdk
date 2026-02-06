@@ -1,0 +1,8 @@
+# Disk DescriptorFile
+version=1
+CID=aabbccdd
+parentCID=ffffffff
+createType="monolithicSparse"
+RW 134217728 SPARSE "Ubuntu-Server-22.vmdk"
+ddb.virtualHWVersion = "21"
+ddb.adapterType = "pvscsi"

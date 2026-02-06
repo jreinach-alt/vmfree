@@ -1,0 +1,23 @@
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "19"
+displayName = "Win2022-DC"
+guestOS = "windows2019srvnext-64"
+memsize = "8192"
+numvcpus = "2"
+
+scsi0.virtualDev = "lsilogic"
+scsi0.present = "TRUE"
+scsi0:0.fileName = "Win2022-DC.vmdk"
+scsi0:0.present = "TRUE"
+scsi0:1.fileName = "Win2022-DC-data.vmdk"
+scsi0:1.present = "TRUE"
+
+ethernet0.virtualDev = "vmxnet3"
+ethernet0.present = "TRUE"
+ethernet0.connectionType = "custom"
+ethernet0.networkName = "VM Network"
+ethernet0.addressType = "static"
+ethernet0.address = "00:50:56:a1:b2:c3"
+
+svga.present = "TRUE"

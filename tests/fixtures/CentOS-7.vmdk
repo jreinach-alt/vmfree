@@ -1,0 +1,8 @@
+# Disk DescriptorFile
+version=1
+CID=99aabbcc
+parentCID=ffffffff
+createType="monolithicSparse"
+RW 83886080 SPARSE "CentOS-7.vmdk"
+ddb.virtualHWVersion = "14"
+ddb.adapterType = "lsilogic"
