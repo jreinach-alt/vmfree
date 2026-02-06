@@ -150,13 +150,14 @@ vmfree migrate <SOURCE> --target <kvm|proxmox> [OPTIONS]
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--target` | Target hypervisor: `kvm` or `proxmox` | Required |
-| `--output` | Output directory for converted files | `.` |
+| `--output` | Output directory for converted files | Source dir |
 | `--bridge` | Network bridge name | Auto-detected |
 | `--storage` | Proxmox storage target | `local-lvm` |
 | `--vmid` | Proxmox VM ID | `100` |
 | `--format` | Disk format: `qcow2` or `raw` | `qcow2` |
 | `--windows-safe` | Force IDE+e1000 (auto-enabled for Windows) | Off |
 | `--preserve-mac` | Keep original MAC addresses | Off |
+| `--execute` | Run Proxmox qm commands directly (Proxmox target only) | Off |
 | `--dry-run` | Show plan without executing | Off |
 | `--no-fixup` | Skip guest OS modifications | Off |
 | `-v, --verbose` | Detailed output | Off |
@@ -178,6 +179,9 @@ vmfree migrate ./WinDC.vmx --target kvm --windows-safe
 
 # From an OVA export
 vmfree migrate ./exported-vm.ova --target proxmox --storage ceph-pool
+
+# Execute Proxmox commands directly after conversion
+vmfree migrate ./WebServer.vmx --target proxmox --vmid 200 --execute
 ```
 
 ### `vmfree inspect`
@@ -292,7 +296,17 @@ ruff check vmfree/ tests/
 pytest tests/test_vmx.py -v
 ```
 
-495 tests. All passing. Every module has comprehensive test coverage.
+839 tests. All passing. Every module has comprehensive test coverage.
+
+## Real-World Testing
+
+VMFree has been tested against real VMware artifacts from multiple sources:
+
+**Parser validation** — 10 OVF fixtures from VMware govmomi, OpenStack Nova, ManageIQ, and Canonical cloud-init. Covers OVF v1 and v2 namespaces, VirtualSystemCollection (vCloud vApps), multi-NIC appliances, and EFI/BIOS guests.
+
+**Output validation** — Generated libvirt XML is validated against the official libvirt RelaxNG schema (the same schema used by `virt-xml-validate` and `virsh define`). Proxmox `qm` commands are validated structurally for correct subcommands, required flags, and valid values.
+
+**Live migration** — Successfully migrated a VMware Workstation Ubuntu 24.04 VM (split sparse VMDK, lsilogic controller, e1000 NIC, BIOS firmware) to Proxmox VE 9. The VM booted and ran correctly on the first attempt.
 
 ## Contributing
 
