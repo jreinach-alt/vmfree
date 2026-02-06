@@ -17,6 +17,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from vmfree import __version__
+from vmfree.batch import (
+    discover_vms,
+    generate_report,
+    load_inventory,
+    run_batch,
+)
 from vmfree.converter.disk import convert_disk
 from vmfree.converter.validate import check_free_space, check_qemu_img_installed
 from vmfree.generators.libvirt import generate_libvirt_xml
@@ -84,12 +90,20 @@ def main():
 @click.option("--windows-safe", is_flag=True,
               help="Use IDE+e1000 for Windows (default for detected Windows guests).")
 @click.option("--preserve-mac", is_flag=True, help="Keep original MAC addresses.")
+@click.option("--compress", is_flag=True, help="Enable qcow2 compression (saves disk space).")
+@click.option("--preallocation", type=click.Choice(["off", "metadata", "full"]),
+              default=None, help="Disk preallocation mode.")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without doing it.")
 @click.option("--execute", is_flag=True,
               help="Execute Proxmox qm commands directly instead of writing a script.")
+@click.option("--snapshot-after-import", default=None,
+              help="Create Proxmox snapshot after import (e.g. 'pre-boot').")
+@click.option("--network-map", multiple=True,
+              help="Map VMware network to KVM bridge (e.g. 'VM Network=vmbr0'). Repeatable.")
 @click.option("-v", "--verbose", is_flag=True, help="Detailed output.")
 def migrate(source, target, output, bridge, storage, vmid, disk_format,
-            no_fixup, windows_safe, preserve_mac, dry_run, execute, verbose):
+            no_fixup, windows_safe, preserve_mac, compress, preallocation,
+            dry_run, execute, snapshot_after_import, network_map, verbose):
     """Migrate a VMware VM to KVM/Proxmox."""
     _run_migration(
         source=source,
@@ -101,10 +115,136 @@ def migrate(source, target, output, bridge, storage, vmid, disk_format,
         disk_format=disk_format,
         windows_safe=windows_safe,
         preserve_mac=preserve_mac,
+        compress=compress,
+        preallocation=preallocation,
         dry_run=dry_run,
         execute=execute,
+        snapshot_after_import=snapshot_after_import,
+        network_map=list(network_map),
         verbose=verbose,
     )
+
+
+@main.command()
+@click.argument("source", type=click.Path(exists=True))
+@click.option("--target", type=click.Choice(["kvm", "proxmox"]), required=True,
+              help="Target hypervisor.")
+@click.option("--output", type=click.Path(), default=None,
+              help="Output directory for converted files.")
+@click.option("--bridge", default=None, help="Network bridge.")
+@click.option("--storage", default="local-lvm", help="Proxmox storage target.")
+@click.option("--vmid-start", type=int, default=100, help="Starting Proxmox VM ID.")
+@click.option("--format", "disk_format", type=click.Choice(["qcow2", "raw"]), default="qcow2",
+              help="Output disk format.")
+@click.option("--inventory", is_flag=True, help="Treat source as inventory file (one path/line).")
+@click.option("--resume/--no-resume", default=True, help="Resume interrupted batch.")
+@click.option("--stop-on-error", is_flag=True, help="Stop batch on first failure.")
+@click.option("--preserve-mac", is_flag=True, help="Keep original MAC addresses.")
+@click.option("--compress", is_flag=True, help="Enable qcow2 compression.")
+@click.option("-v", "--verbose", is_flag=True, help="Detailed output.")
+def batch(source, target, output, bridge, storage, vmid_start, disk_format,
+          inventory, resume, stop_on_error, preserve_mac, compress, verbose):
+    """Migrate multiple VMs from a directory or inventory file."""
+    _run_batch(
+        source=source,
+        target=target,
+        output_dir=output,
+        bridge=bridge,
+        storage=storage,
+        vmid_start=vmid_start,
+        disk_format=disk_format,
+        is_inventory=inventory,
+        resume=resume,
+        stop_on_error=stop_on_error,
+        preserve_mac=preserve_mac,
+        compress=compress,
+        verbose=verbose,
+    )
+
+
+def _run_batch(
+    *,
+    source: str,
+    target: str,
+    output_dir: str | None,
+    bridge: str | None,
+    storage: str,
+    vmid_start: int,
+    disk_format: str,
+    is_inventory: bool,
+    resume: bool,
+    stop_on_error: bool,
+    preserve_mac: bool,
+    compress: bool,
+    verbose: bool,
+    run_command: object = None,
+):
+    """Execute batch migration."""
+    console.print(f"\n  [bold]VMFree v{__version__}[/bold] — Batch Migration\n")
+
+    # Discover VMs
+    if is_inventory:
+        sources = load_inventory(source)
+        console.print(f"  Loaded {len(sources)} VMs from inventory file")
+    else:
+        sources = discover_vms(source)
+        console.print(f"  Discovered {len(sources)} VMs in {source}")
+
+    if not sources:
+        console.print("  [yellow]No VM files found.[/yellow]")
+        return
+
+    for s in sources:
+        console.print(f"    {s.name}")
+
+    # Set up state file for resume capability
+    source_path = Path(source)
+    if source_path.is_dir():
+        state_file = source_path / ".vmfree-batch-state.json"
+    else:
+        state_file = source_path.parent / ".vmfree-batch-state.json"
+
+    # Build per-VM migration kwargs with auto-incrementing VMID
+    vmid_counter = [vmid_start]
+
+    def migrate_one(source, **kwargs):
+        current_vmid = vmid_counter[0]
+        vmid_counter[0] += 1
+        return _run_migration(
+            source=source,
+            target=target,
+            output_dir=output_dir,
+            bridge=bridge,
+            storage=storage,
+            vmid=current_vmid,
+            disk_format=disk_format,
+            windows_safe=False,
+            preserve_mac=preserve_mac,
+            compress=compress,
+            dry_run=False,
+            verbose=verbose,
+            run_command=run_command,
+        )
+
+    result = run_batch(
+        sources,
+        migrate_fn=migrate_one,
+        resume=resume,
+        stop_on_error=stop_on_error,
+        state_file=str(state_file),
+    )
+
+    # Show summary
+    console.print("\n  [bold]Batch Complete[/bold]")
+    console.print(f"    Succeeded: [green]{result.succeeded}[/green]")
+    console.print(f"    Failed:    [red]{result.failed}[/red]")
+    console.print(f"    Skipped:   [dim]{result.skipped}[/dim]")
+
+    # Write report
+    report = generate_report(result)
+    report_path = Path(str(state_file)).parent / "vmfree-batch-report.md"
+    report_path.write_text(report)
+    console.print(f"    Report:    {report_path}")
 
 
 @main.command()
@@ -357,8 +497,12 @@ def _run_migration(
     disk_format: str,
     windows_safe: bool,
     preserve_mac: bool,
+    compress: bool = False,
+    preallocation: str | None = None,
     dry_run: bool,
     execute: bool = False,
+    snapshot_after_import: str | None = None,
+    network_map: list[str] | None = None,
     verbose: bool,
     run_command: object = None,
 ) -> bool:
@@ -394,9 +538,16 @@ def _run_migration(
         windows_safe=windows_safe,
     )
 
-    # -- Stage 3: Detect network bridge --
-    if bridge is None:
+    # -- Stage 3: Detect network bridge / resolve network mappings --
+    net_mappings = _parse_network_map(network_map or [])
+    if net_mappings:
+        bridges = _resolve_bridges(vm, net_mappings, bridge or detect_bridge(target=target))
+        bridge = bridges[0] if bridges else detect_bridge(target=target)
+    elif bridge is None:
         bridge = detect_bridge(target=target)
+        bridges = [bridge] * len(vm.nics) if vm.nics else [bridge]
+    else:
+        bridges = [bridge] * len(vm.nics) if vm.nics else [bridge]
 
     # -- Stage 4: Pre-flight checks --
     preflight_items = _build_preflight_display(vm, hw, bridge, target, storage)
@@ -428,6 +579,8 @@ def _run_migration(
             disk.path,
             outdir,
             disk_format=disk_format,
+            compress=compress,
+            preallocation=preallocation,
             run_command=run_command,
         )
         if not result.success:
@@ -459,6 +612,7 @@ def _run_migration(
             storage=storage,
             bridge=bridge,
             preserve_mac=preserve_mac,
+            snapshot_name=snapshot_after_import,
         )
         script_path = outdir / f"{vm.name}-proxmox.sh"
         script_path.write_text("#!/bin/bash\nset -e\n\n" + "\n\n".join(cmds) + "\n")
@@ -593,6 +747,38 @@ def _execute_proxmox_commands(
         if result.stdout.strip():
             console.print(f"  {result.stdout.strip()}")
         console.print("  [green]ok[/green]")
+
+
+def _parse_network_map(mappings: list[str]) -> dict[str, str]:
+    """Parse --network-map 'VMware Network=kvm_bridge' strings.
+
+    Returns dict mapping VMware network names to KVM bridge names.
+    """
+    result: dict[str, str] = {}
+    for mapping in mappings:
+        if "=" not in mapping:
+            continue
+        vmware_net, _, kvm_bridge = mapping.partition("=")
+        vmware_net = vmware_net.strip()
+        kvm_bridge = kvm_bridge.strip()
+        if vmware_net and kvm_bridge:
+            result[vmware_net] = kvm_bridge
+    return result
+
+
+def _resolve_bridges(vm, net_mappings: dict[str, str], default_bridge: str) -> list[str]:
+    """Resolve each NIC's VMware network name to a KVM bridge.
+
+    For NICs whose network_name is in net_mappings, use the mapped bridge.
+    For all others, use the default_bridge.
+    """
+    bridges: list[str] = []
+    for nic in vm.nics:
+        if nic.network_name in net_mappings:
+            bridges.append(net_mappings[nic.network_name])
+        else:
+            bridges.append(default_bridge)
+    return bridges
 
 
 def _show_summary(vm, hw, target, bridge, converted_paths, vmid, preserve_mac):
